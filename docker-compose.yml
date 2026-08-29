@@ -1,0 +1,43 @@
+version: "3.8"
+services:
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.30.5
+    ports:
+      - "8080:8080"
+      - "50051:50051"   # gRPC port - required by weaviate-client v4
+    restart: on-failure
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"   # we supply our own vectors via sentence-transformers
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: "node1"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: seven
+      dockerfile: seven/Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      weaviate:
+        condition: service_healthy
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      WEAVIATE_HOST: weaviate   # container-to-container, not localhost
+      WEAVIATE_PORT: 8080
+      WEAVIATE_GRPC_PORT: 50051
+    restart: on-failure
+
+volumes:
+  weaviate_data:

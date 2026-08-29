@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+venv/
+.venv/
+.idea
+
+# Secrets / local env
+.env
+*.local
+
+
+# macOS
+.DS_Store

@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+langgraph
+langchain-core
+langsmith
+weaviate-client>=4.23.0
+sentence-transformers
+openai
