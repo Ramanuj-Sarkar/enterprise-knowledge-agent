@@ -71,7 +71,6 @@ companies.
 docker compose up -d
 
 cd vectorstore
-pip install -r requirements.txt
 
 # embeds every chunk with sentence-transformers (all-MiniLM-L6-v2, local,
 # free, no API key) and upserts into Weaviate, then runs a sanity-check

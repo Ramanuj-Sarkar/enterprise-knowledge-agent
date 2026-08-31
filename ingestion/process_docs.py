@@ -14,9 +14,26 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import uuid
 from pathlib import Path
+
+# Spark only supports Java 17/21. Newer JDKs (removed jdk.internal.ref.Cleaner,
+# stronger encapsulation of jdk.internal.*) fail at SparkContext init with
+# ClassNotFoundException / ExceptionInInitializerError. Point the JVM Spark
+# launches at a supported JDK if one is installed, without disturbing the
+# system default `java`.
+if "JAVA_HOME" not in os.environ:
+    for _candidate in (
+        "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+        "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
+        "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+        "/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
+    ):
+        if os.path.isdir(_candidate):
+            os.environ["JAVA_HOME"] = _candidate
+            break
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -67,13 +84,32 @@ def chunk_text(text: str, chunk_size=CHUNK_SIZE_WORDS, overlap=CHUNK_OVERLAP_WOR
 
 
 def build_spark_session(app_name="filing-ingestion"):
-    return (
+    # In local mode the driver JVM is also the executor, and it holds whole
+    # filings in memory (wholeTextFiles + text-heavy shuffles). The stock ~1g
+    # heap OOMs on real 10-Ks. driver/executor memory must be set before the
+    # JVM launches, so it goes through PYSPARK_SUBMIT_ARGS, not .config().
+    existing = os.environ.get("PYSPARK_SUBMIT_ARGS", "")
+    if "--driver-memory" not in existing:
+        prefix = existing.replace("pyspark-shell", "").strip()
+        os.environ["PYSPARK_SUBMIT_ARGS"] = (
+            f"{prefix} --driver-memory 8g --executor-memory 8g pyspark-shell".strip()
+        )
+
+    spark = (
         SparkSession.builder
         .appName(app_name)
         .master("local[*]")  # standalone mode - no cluster needed to run this
         .config("spark.sql.shuffle.partitions", "8")
+        # A whole 10-K is one giant string cell. The Python-UDF bridge buffers
+        # `maxRecordsPerBatch` rows (default 100) of input AND output on both
+        # sides at once - 100 multi-MB filings per batch is what OOMs the JVM.
+        # Push it down so only a handful of documents are in flight per batch.
+        .config("spark.sql.execution.python.udf.maxRecordsPerBatch", "4")
         .getOrCreate()
     )
+    driver_mem = spark.sparkContext._jsc.sc().conf().get("spark.driver.memory", "<default>")
+    print(f"Spark driver memory: {driver_mem}")
+    return spark
 
 
 def main():
@@ -95,10 +131,19 @@ def main():
     spark.sparkContext._jsc.hadoopConfiguration().set(
         "mapreduce.input.fileinputformat.input.dir.recursive", "true"
     )
+    # wholeTextFiles packs many documents into very few partitions (often 1-2),
+    # so a single task ends up cleaning every filing. A full 10-K with exhibits
+    # can be 20-40 MB of HTML in a single string cell, so spread one document
+    # per partition to keep each task's working set to roughly one document.
+    # Do NOT .cache()/.persist() this frame: the in-memory columnar cache
+    # buffers a whole batch of these multi-MB blobs (and clones each one for
+    # column stats), which is itself an OOM.
     raw_rdd = spark.sparkContext.wholeTextFiles(str(input_dir))
-    raw_df = raw_rdd.toDF(["file_path", "raw_text"])
+    file_count = raw_rdd.count()
+    n_parts = max(file_count, spark.sparkContext.defaultParallelism)
+    raw_df = raw_rdd.toDF(["file_path", "raw_text"]).repartition(n_parts)
 
-    print(f"Loaded {raw_df.count()} raw files from {input_dir}")
+    print(f"Loaded {file_count} raw files from {input_dir}")
 
     # Derive ticker/doc id from the folder structure sec-edgar-downloader
     # produces: .../sec-edgar-filings/<TICKER>/10-K/<accession>/...
@@ -120,8 +165,15 @@ def main():
     cleaned_df = cleaned_df.filter(F.length("clean_text") > 200)
 
     # Deduplicate near-identical filings (EDGAR sometimes stores the same
-    # filing under multiple file variants - exhibit copies, etc.)
-    deduped_df = cleaned_df.dropDuplicates(["ticker", "clean_text"])
+    # filing under multiple file variants - exhibit copies, etc.).
+    # Dedup on a content hash rather than the raw text: dropDuplicates shuffles
+    # its key columns, and shuffling multi-MB text blobs is what blows the heap.
+    deduped_df = (
+        cleaned_df
+        .withColumn("_text_hash", F.sha2(F.col("clean_text"), 256))
+        .dropDuplicates(["ticker", "_text_hash"])
+        .drop("_text_hash")
+    )
 
     print(f"After cleaning + dedup: {deduped_df.count()} documents")
 

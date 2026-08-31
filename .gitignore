@@ -10,6 +10,8 @@ venv/
 # Secrets / local env
 .env
 *.local
+data/raw
+data/processed
 
 
 # macOS
