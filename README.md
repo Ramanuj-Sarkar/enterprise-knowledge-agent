@@ -186,11 +186,18 @@ export OPENAI_API_KEY=sk-...
 export LANGCHAIN_API_KEY=ls-...
 export LANGCHAIN_TRACING_V2=true
 
-docker compose up --build
+docker compose up -d weaviate
 ```
 
 This starts two containers: `weaviate` (vector store) and `api` (FastAPI,
 waits for Weaviate's healthcheck before starting). Once running:
+
+```bash
+OPENAI_API_KEY=sk-...
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Then, in another terminal:
 
 ```bash
 curl -X POST http://localhost:8000/ask \
@@ -214,5 +221,4 @@ resolves to `localhost` for local dev and to the `weaviate` container
 hostname when set by docker-compose. That's the detail that quietly
 breaks a lot of first-time container networking setups, so worth
 mentioning if asked about it directly. Live end-to-end run (the full stack
-actually talking to real Weaviate + OpenAI) hasn't been done in this
-sandboxed environment and is the one thing left to verify on my machine.
+actually talking to real Weaviate + OpenAI) has also been done now.
